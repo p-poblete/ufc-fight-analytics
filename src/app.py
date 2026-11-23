@@ -1211,9 +1211,9 @@ if "peleador_1" in st.session_state and "peleador_2" in st.session_state:
     with col1:
         img, info = st.columns([1, 2])
         with img:
-            #st.image("perfil_vacio.png"#, caption="Foto del peleador"
-            #         )
-            st.write("Imagen referencial del peleador")
+            st.image("perfil_vacio.png"#, caption="Foto del peleador"
+                     )
+            #st.write("Imagen referencial del peleador")
         with info:
             st.markdown(f"**Nombre**: {n1}")
             st.markdown(f"**Edad**: {int(perf_p1['age'].values)}")
@@ -1340,15 +1340,6 @@ if "peleador_1" in st.session_state and "peleador_2" in st.session_state:
             st.info("No hay suficientes cruces de variables para calcular la matriz de Pearson.")
 
     st.divider()
-    st.subheader("🧬 Mapa de ADN de Combate: Análisis Multivariado PCA")
-    st.markdown(
-        """
-        El **PCA (Análisis de Componentes Principales)** fusiona todas las métricas físicas y de rendimiento 
-        para descubrir los verdaderos perfiles de los peleadores. En lugar de ver números sueltos, 
-        este modelo matemático agrupa las estadísticas en ejes de comportamiento estilístico.
-        """
-    )
-
     fig_var, fig_bi = generar_analisis_pca(df_ufc)
 
     if fig_var is not None and fig_bi is not None:
@@ -1376,6 +1367,5 @@ if "peleador_1" in st.session_state and "peleador_2" in st.session_state:
             "No hay suficientes registros numéricos sin valores nulos "
             "para calcular la matriz de covarianza del PCA."
         )
-        
 else:
     st.warning("Por favor, selecciona ambos peleadores en la parte superior para ver la comparación.")
