@@ -78,11 +78,14 @@ st.markdown("""
 
 st.title("Dashboard :red[_UFC Analytics_]")
 
-# 1. Carga de datos
 @st.cache_data
 def cargar_y_procesar_todo():
     path = kagglehub.dataset_download("mdabbert/ultimate-ufc-dataset")
     df_completo = pd.read_csv(f"{path}/ufc-master.csv")
+
+    # 1. Asegurar orden cronológico estricto de las peleas
+    df_completo['date'] = pd.to_datetime(df_completo['date'])
+    df_completo = df_completo.sort_values(by='date', ascending=True).reset_index(drop=True)
 
     df_completo = df_completo.rename(columns={
         'R_draw': 'R_draws', 'B_draw': 'B_draws',
@@ -91,6 +94,7 @@ def cargar_y_procesar_todo():
         'R_win_by_Submission': 'R_win_by_Submission', 'B_win_by_Submission': 'B_win_by_Submission'
     })
 
+    # Consolidar decisiones antes de separar
     for prefix in ['R_', 'B_']:
         dec_cols = [c for c in df_completo.columns if c.startswith(f"{prefix}win_by_Decision")]
         df_completo[f"{prefix}win_by_Decision_Total"] = df_completo[dec_cols].sum(axis=1) if dec_cols else 0
@@ -103,23 +107,69 @@ def cargar_y_procesar_todo():
         'win_by_KO_TKO', 'win_by_Submission', 'win_by_Decision_Total'
     ]
 
-    df_red = df_completo[['R_' + col for col in cols_interes]].copy()
-    df_red.columns = [col.replace('_Total', '') for col in cols_interes]
-    df_blue = df_completo[['B_' + col for col in cols_interes]].copy()
-    df_blue.columns = [col.replace('_Total', '') for col in cols_interes]
+    # Separar esquinas manteniendo la fecha para ordenarlas
+    df_red = df_completo[['date', 'Winner', 'finish'] + ['R_' + col for col in cols_interes]].copy()
+    df_red.columns = ['date', 'Winner', 'finish'] + [col.replace('_Total', '') for col in cols_interes]
+    df_red['esquina'] = 'Red'
 
-    df_red_blue = pd.concat([df_red, df_blue], axis=0, ignore_index=True).sort_values(by='age')
+    df_blue = df_completo[['date', 'Winner', 'finish'] + ['B_' + col for col in cols_interes]].copy()
+    df_blue.columns = ['date', 'Winner', 'finish'] + [col.replace('_Total', '') for col in cols_interes]
+    df_blue['esquina'] = 'Blue'
 
+    df_red_blue = pd.concat([df_red, df_blue], axis=0, ignore_index=True)
+    # Volver a ordenar cronológicamente para que 'last()' sea realmente la última pelea del peleador
+    df_red_blue = df_red_blue.sort_values(by='date', ascending=True).reset_index(drop=True)
+
+    # Variables de rendimiento promedio en combate
     df_acciones = df_red_blue.groupby('fighter').agg({
         'avg_SIG_STR_landed': 'mean', 'avg_SIG_STR_pct': 'mean',
         'avg_SUB_ATT': 'mean', 'avg_TD_landed': 'mean', 'avg_TD_pct': 'mean'
     }).reset_index()
 
-    df_perfil = df_red_blue.groupby('fighter').agg({
-        'Height_cms': 'last', 'Reach_cms': 'last', 'Weight_lbs': 'last', 'age': 'max', 'Stance': 'last',
-        'wins': 'last', 'losses': 'last', 'draws': 'last', 'current_win_streak': 'last', 'current_loss_streak': 'last',
-        'win_by_KO_TKO': 'sum', 'win_by_Submission': 'sum', 'win_by_Decision': 'sum'
-    }).reset_index()
+    # 2. Reconstrucción del récord real (Estadística Previa + Resultado de su última pelea)
+    def calcular_record_real(grupo):
+        ultima_pelea = grupo.iloc[-1]
+        
+        # Valores acumulados antes de su última pelea
+        total_wins = ultima_pelea['wins']
+        total_losses = ultima_pelea['losses']
+        total_draws = ultima_pelea['draws']
+        ko_wins = ultima_pelea['win_by_KO_TKO']
+        sub_wins = ultima_pelea['win_by_Submission']
+        dec_wins = ultima_pelea['win_by_Decision']
+        
+        # Sumar el resultado de esa última pelea si la ganó
+        if ultima_pelea['Winner'] == ultima_pelea['esquina']:
+            total_wins += 1
+            metodo = str(ultima_pelea['finish']).upper()
+            if 'KO' in metodo:
+                ko_wins += 1
+            elif 'SUB' in metodo:
+                sub_wins += 1
+            elif 'DEC' in metodo:
+                dec_wins += 1
+        elif ultima_pelea['Winner'] not in ['Draw', 'No Contest'] and pd.notna(ultima_pelea['Winner']):
+            total_losses += 1
+        elif ultima_pelea['Winner'] == 'Draw':
+            total_draws += 1
+            
+        return pd.Series({
+            'Height_cms': ultima_pelea['Height_cms'],
+            'Reach_cms': ultima_pelea['Reach_cms'],
+            'Weight_lbs': ultima_pelea['Weight_lbs'],
+            'age': grupo['age'].max(),
+            'Stance': ultima_pelea['Stance'],
+            'wins': total_wins,
+            'losses': total_losses,
+            'draws': total_draws,
+            'current_win_streak': ultima_pelea['current_win_streak'],
+            'current_loss_streak': ultima_pelea['current_loss_streak'],
+            'win_by_KO_TKO': ko_wins,
+            'win_by_Submission': sub_wins,
+            'win_by_Decision': dec_wins
+        })
+
+    df_perfil = df_red_blue.groupby('fighter').apply(calcular_record_real, include_groups=False).reset_index()
 
     r_filtros = df_completo[['R_fighter', 'weight_class', 'gender']].rename(columns={'R_fighter': 'fighter'})
     b_filtros = df_completo[['B_fighter', 'weight_class', 'gender']].rename(columns={'B_fighter': 'fighter'})
@@ -418,23 +468,99 @@ if len(df_clean) > 10:
             if not df_analisis.empty:
                 tab_perf, tab_vics = st.tabs(["Atributos Tácticos", "Vías de Victoria"])
                 
+                # --- Función auxiliar para variar la tonalidad del color de forma controlada ---
+                import colorsys
+                def generar_tonalidad_arquetipo(hex_color, indice, total):
+                    """Genera una variante de luminosidad del color HEX base para distinguir peleadores."""
+                    if total <= 1:
+                        return hex_color
+                    # Convertir HEX a RGB (valores entre 0 y 1)
+                    hex_color = hex_color.lstrip('#')
+                    r, g, b = tuple(int(hex_color[i:i+2], 16)/255.0 for i in (0, 2, 4))
+                    # Convertir RGB a HLS (Hue, Lightness, Saturation)
+                    h, l, s = colorsys.rgb_to_hls(r, g, b)
+                    
+                    # Variamos la luminosidad de forma simétrica alrededor del color original
+                    # Paso de escala: de más claro a más oscuro
+                    factor_desplazamiento = (indice - (total - 1) / 2) * (0.25 / max(1, total - 1))
+                    nueva_l = max(0.15, min(0.85, l + factor_desplazamiento))
+                    
+                    # Convertir de vuelta a RGB y luego a HEX
+                    r_n, g_n, b_n = colorsys.hls_to_rgb(h, nueva_l, s)
+                    return f"#{int(r_n*255):02x}{int(g_n*255):02x}{int(b_n*255):02x}"
+
+                # Mapear a cada peleador seleccionado una tonalidad personalizada basada en su arquetipo
+                colores_peleadores_seleccionados = {}
+                # Agrupamos por arquetipo para aplicar el gradiente solo entre los que comparten grupo
+                conteos_por_arquetipo = df_analisis['cluster_arquetipo'].value_counts().to_dict()
+                indices_procesados = {arq: 0 for arq in conteos_por_arquetipo}
+
+                for _, row in df_analisis.iterrows():
+                    p_name = row['fighter']
+                    arq = row['cluster_arquetipo']
+                    color_base = colores_arquetipo.get(arq, '#E63946')
+                    
+                    # Generamos la tonalidad única basada en el índice de este peleador en su arquetipo
+                    total_en_grupo = conteos_por_arquetipo[arq]
+                    color_variado = generar_tonalidad_arquetipo(color_base, indices_procesados[arq], total_en_grupo)
+                    colores_peleadores_seleccionados[p_name] = color_variado
+                    
+                    indices_procesados[arq] += 1
+                
                 with tab_perf:
                     if "Originales" in tipo_escala:
-                        if df_analisis['avg_SIG_STR_pct'].max() <= 1.0: df_analisis['avg_SIG_STR_pct'] *= 100
-                        if df_analisis['avg_TD_pct'].max() <= 1.0: df_analisis['avg_TD_pct'] *= 100
+                        if df_analisis['avg_SIG_STR_pct'].max() <= 1.0: 
+                            df_analisis['avg_SIG_STR_pct'] = df_analisis['avg_SIG_STR_pct'] * 100
+                        if df_analisis['avg_TD_pct'].max() <= 1.0: 
+                            df_analisis['avg_TD_pct'] = df_analisis['avg_TD_pct'] * 100
                     
                     fig_prec = go.Figure()
                     for idx, row in df_analisis.iterrows():
-                        fig_prec.add_trace(go.Bar(x=[labels_metricas[c] for c in metricas_parcoords], y=[row[c] for c in metricas_parcoords], name=row['fighter']))
-                    fig_prec.update_layout(barmode='group', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=140, margin=dict(t=5, b=5, l=5, r=5), font=dict(size=8, color='white'), showlegend=False)
+                        p_name = row['fighter']
+                        color_p = colores_peleadores_seleccionados[p_name]
+                        
+                        fig_prec.add_trace(go.Bar(
+                            x=[labels_metricas[c] for c in metricas_parcoords], 
+                            y=[row[c] for c in metricas_parcoords], 
+                            name=p_name,
+                            marker_color=color_p
+                        ))
+                    
+                    fig_prec.update_layout(
+                        barmode='group', 
+                        paper_bgcolor='rgba(0,0,0,0)', 
+                        plot_bgcolor='rgba(0,0,0,0)', 
+                        height=165, 
+                        margin=dict(t=5, b=5, l=5, r=5), 
+                        font=dict(size=8, color='white'), 
+                        showlegend=True,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=8))
+                    )
                     st.plotly_chart(fig_prec, use_container_width=True, key="precision_barras")
                 
                 with tab_vics:
                     df_v_reales = df_clean_filtrado[df_clean_filtrado['fighter'].isin(st.session_state.peleadores_seleccionados)]
-                    df_m_vic = df_v_reales.melt(id_vars=['fighter'], value_vars=['win_by_KO_TKO', 'win_by_Submission', 'win_by_Decision'], var_name='Metodo', value_name='Total')
+                    df_m_vic = df_v_reales.melt(id_vars=['fighter', 'cluster_arquetipo'], value_vars=['win_by_KO_TKO', 'win_by_Submission', 'win_by_Decision'], var_name='Metodo', value_name='Total')
                     df_m_vic['Metodo'] = df_m_vic['Metodo'].map({'win_by_KO_TKO': 'KO', 'win_by_Submission': 'SUB', 'win_by_Decision': 'DEC'})
-                    fig_vic = px.bar(df_m_vic, x='Metodo', y='Total', color='fighter', barmode='group', text_auto=True)
-                    fig_vic.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=140, margin=dict(t=5, b=5, l=5, r=5), font=dict(size=8, color='white'), showlegend=False)
+                    
+                    fig_vic = px.bar(
+                        df_m_vic, 
+                        x='Metodo', 
+                        y='Total', 
+                        color='fighter', 
+                        barmode='group', 
+                        text_auto=True,
+                        color_discrete_map=colores_peleadores_seleccionados
+                    )
+                    fig_vic.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)', 
+                        plot_bgcolor='rgba(0,0,0,0)', 
+                        height=165, 
+                        margin=dict(t=5, b=5, l=5, r=5), 
+                        font=dict(size=8, color='white'), 
+                        showlegend=True,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=8))
+                    )
                     st.plotly_chart(fig_vic, use_container_width=True, key="victorias_barras")
     else:
         st.caption("Usa la herramienta de selección (Caja o Lazo) de los mapas superiores para activar el comparador individual.")
